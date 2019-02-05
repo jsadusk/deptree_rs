@@ -17,7 +17,9 @@ pub enum DeptreeError {
     #[fail(display = "Target {} already failed, tried to finish", _0)]
     FinishFailed(String),
     #[fail(display = "Target {} already failed, tried to fail", _0)]
-    AlreadyFailed(String)
+    AlreadyFailed(String),
+    #[fail(display = "Target {} not yet started, tried to fail", _0)]
+    UnstartedFailed(String)
 }
 
 type DeptreeResult<T> = Result<T, DeptreeError>;
@@ -58,14 +60,16 @@ type Targets<Attribs> = Vec<TargetData<Attribs>>;
 
 pub struct Deptree<Attribs = ()> {
     targets : Targets<Attribs>,
-    roots : Indices
+    roots : Indices,
+    running : usize
 }
 
 impl<Attribs> Deptree<Attribs> {
     pub fn new() -> Deptree {
         Deptree {
             targets : Targets::new(),
-            roots : Indices::new()
+            roots : Indices::new(),
+            running : 0
         }
     }
 
@@ -115,6 +119,7 @@ impl<Attribs> Deptree<Attribs> {
             TargetState::Unstarted => {
                 data.state = TargetState::Started;
                 self.roots.remove(&target);
+                self.running += 1;
                 Ok(())
             }
         }
@@ -135,9 +140,32 @@ impl<Attribs> Deptree<Attribs> {
                 for dependent in data.depended_by.iter() {
                     self.roots.insert(*dependent);
                 }
+                self.running -= 1;
                 Ok(())
             }
         }
+    }
+
+    pub fn fail(&mut self, target : TargetIndex) ->DeptreeResult<()> {
+        let data = &mut self.targets[target.0];
+
+        match data.state {
+            TargetState::Unstarted =>
+                Err(DeptreeError::UnstartedFailed(data.name.clone())),
+            TargetState::Finished =>
+                Err(DeptreeError::FinishFailed(data.name.clone())),
+            TargetState::Failed =>
+                Err(DeptreeError::AlreadyFailed(data.name.clone())),
+            TargetState::Started => {
+                data.state = TargetState::Failed;
+                self.running -= 1;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn done(&self) -> bool {
+        self.running == 0 && self.roots.is_empty()
     }
 }
 
@@ -146,11 +174,57 @@ mod tests {
     use super::*;
     
     #[test]
-    fn it_works() {
+    fn two_target() {
         let mut deptree = Deptree::<()>::new();
         let a = deptree.add_target("a");
         let b = deptree.add_target("b");
         deptree.depend(b, a);
+
+        assert!(!deptree.done());
+        assert_eq!(deptree.name(a), "a");
+        assert_eq!(deptree.name(b), "b");
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(deptree.name(ready[0]), "a");
+        assert!(!deptree.done());
+
+        deptree.start(a).unwrap();
+        assert!(!deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 0);
+        assert!(!deptree.done());
+
+        deptree.finish(a).unwrap();
+        assert!(!deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(deptree.name(ready[0]), "b");
+        assert!(!deptree.done());
+
+        deptree.start(b).unwrap();
+        assert!(!deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 0);
+        assert!(!deptree.done());
+
+        deptree.finish(b).unwrap();
+        assert!(deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 0);
+    }
+
+    #[test]
+    fn two_target_fail() {
+        let mut deptree = Deptree::<()>::new();
+        let a = deptree.add_target("a");
+        let b = deptree.add_target("b");
+        deptree.depend(b, a);
+        assert!(!deptree.done());
 
         assert_eq!(deptree.name(a), "a");
         assert_eq!(deptree.name(b), "b");
@@ -158,24 +232,17 @@ mod tests {
         let ready = deptree.ready();
         assert_eq!(ready.len(), 1);
         assert_eq!(deptree.name(ready[0]), "a");
+        assert!(!deptree.done());
 
         deptree.start(a).unwrap();
+        assert!(!deptree.done());
 
         let ready = deptree.ready();
         assert_eq!(ready.len(), 0);
+        assert!(!deptree.done());
 
-        deptree.finish(a).unwrap();
-
-        let ready = deptree.ready();
-        assert_eq!(ready.len(), 1);
-        assert_eq!(deptree.name(ready[0]), "b");
-
-        deptree.start(b).unwrap();
-
-        let ready = deptree.ready();
-        assert_eq!(ready.len(), 0);
-
-        deptree.finish(b).unwrap();
+        deptree.fail(a).unwrap();
+        assert!(deptree.done());
 
         let ready = deptree.ready();
         assert_eq!(ready.len(), 0);
