@@ -24,6 +24,7 @@ pub enum DeptreeError {
 
 type DeptreeResult<T> = Result<T, DeptreeError>;
 
+#[derive(Eq, PartialEq)]
 enum TargetState {
     Unstarted,
     Started,
@@ -31,7 +32,7 @@ enum TargetState {
     Finished
 }
 
-#[derive(Hash, Clone, Copy, Eq, PartialEq)]
+#[derive(Hash, Clone, Copy, Eq, PartialEq, Debug)]
 pub struct TargetIndex(usize);
 
 type Indices = HashSet<TargetIndex>;
@@ -40,8 +41,8 @@ type IndexList = Vec<TargetIndex>;
 struct TargetData<Attribs> {
     name : String,
     state : TargetState,
-    dependencies : Indices,
-    depended_by : Indices,
+    up : Indices,
+    down : Indices,
     attribs : Option<Attribs>
 }
 
@@ -49,8 +50,8 @@ impl<Attribs> TargetData<Attribs> {
     fn new(name: String, attribs : Option<Attribs>) -> Self {
         Self { name : name,
                state : TargetState::Unstarted,
-               dependencies : Indices::new(),
-               depended_by : Indices::new(),
+               up : Indices::new(),
+               down : Indices::new(),
                attribs : attribs
         }
     }
@@ -61,7 +62,9 @@ type Targets<Attribs> = Vec<TargetData<Attribs>>;
 pub struct Deptree<Attribs = ()> {
     targets : Targets<Attribs>,
     roots : Indices,
-    running : usize
+    leaves : Indices,
+    running : usize,
+    simple : bool
 }
 
 impl<Attribs> Deptree<Attribs> {
@@ -69,7 +72,9 @@ impl<Attribs> Deptree<Attribs> {
         Deptree {
             targets : Targets::new(),
             roots : Indices::new(),
-            running : 0
+            leaves : Indices::new(),
+            running : 0,
+            simple : true
         }
     }
 
@@ -78,6 +83,8 @@ impl<Attribs> Deptree<Attribs> {
         self.targets.push(TargetData::new(name.to_string(), attribs));
         let index = TargetIndex(self.targets.len() - 1);
         self.roots.insert(index);
+        self.leaves.insert(index);
+        self.simple = false;
         index
     }
     
@@ -86,9 +93,11 @@ impl<Attribs> Deptree<Attribs> {
     }
 
     pub fn depend(&mut self, one : TargetIndex, two : TargetIndex) {
-        self.targets[one.0].dependencies.insert(two);
-        self.targets[two.0].depended_by.insert(one);
+        self.targets[one.0].up.insert(two);
+        self.targets[two.0].down.insert(one);
         self.roots.remove(&one);
+        self.leaves.remove(&two);
+        self.simple = false;
     }
 
     pub fn name(&self, target : TargetIndex) -> &String {
@@ -100,9 +109,11 @@ impl<Attribs> Deptree<Attribs> {
     }
 
     pub fn ready(&self) -> IndexList {
-        let mut result = IndexList::new();
+        let mut result = IndexList::with_capacity(self.roots.len());
         for i in self.roots.iter() {
-            result.push(*i);
+            if self.targets[i.0].state == TargetState::Unstarted {
+                result.push(*i);
+            }
         }
         result
     }
@@ -118,7 +129,6 @@ impl<Attribs> Deptree<Attribs> {
                 Err(DeptreeError::StartedFinished(data.name.clone())),
             TargetState::Unstarted => {
                 data.state = TargetState::Started;
-                self.roots.remove(&target);
                 self.running += 1;
                 Ok(())
             }
@@ -126,6 +136,8 @@ impl<Attribs> Deptree<Attribs> {
     }
 
     pub fn finish(&mut self, target : TargetIndex) -> DeptreeResult<()> {
+        self.simplify();
+
         let data = &mut self.targets[target.0];
         
         match data.state {
@@ -137,10 +149,11 @@ impl<Attribs> Deptree<Attribs> {
                 Err(DeptreeError::FinishFailed(data.name.clone())),
             TargetState::Started => {
                 data.state = TargetState::Finished;
-                for dependent in data.depended_by.iter() {
+                for dependent in data.down.iter() {
                     self.roots.insert(*dependent);
                 }
                 self.running -= 1;
+                self.roots.remove(&target);
                 Ok(())
             }
         }
@@ -159,6 +172,7 @@ impl<Attribs> Deptree<Attribs> {
             TargetState::Started => {
                 data.state = TargetState::Failed;
                 self.running -= 1;
+                self.roots.remove(&target);
                 Ok(())
             }
         }
@@ -166,6 +180,83 @@ impl<Attribs> Deptree<Attribs> {
 
     pub fn done(&self) -> bool {
         self.running == 0 && self.roots.is_empty()
+    }
+
+    pub fn depended_by(&self, target: TargetIndex) -> IndexList {
+        let data = &self.targets[target.0];
+        
+        let mut result = IndexList::with_capacity(data.down.len());
+        for dep_by in data.down.iter() {
+            result.push(*dep_by);
+        }
+
+        result
+    }
+    
+    pub fn depends_on(&self, target: TargetIndex) -> IndexList {
+        let data = &self.targets[target.0];
+        
+        let mut result = IndexList::with_capacity(data.up.len());
+        for dep_on in data.up.iter() {
+            result.push(*dep_on);
+        }
+
+        result
+    }
+
+    fn simplify_impl(&mut self, target : TargetIndex, last : Option<TargetIndex>,
+                     above : &mut Vec<bool>, below : &mut Vec<bool>) {
+        let num_targets = self.targets.len();
+
+        self.targets[target.0].up.retain(|&d| !above[d.0]);
+
+        match last {
+            Some(l) => above[l.0] = true,
+            None => {}
+        }
+        
+        let mut prune = Vec::<bool>::with_capacity(num_targets);
+        prune.resize(num_targets, false);
+
+        // fighting the borrow checker
+        let down = self.targets[target.0].down.clone();
+        
+        for dependent in down.iter() {
+            self.simplify_impl(*dependent, Some(target), above, below);
+
+            if !self.targets[dependent.0].up.contains(&target) {
+                prune[dependent.0] = true;
+            }
+        }
+
+        self.targets[target.0].down.retain(|&d| !prune[d.0]);
+
+        below[target.0] = true;
+
+        match last {
+            Some(l) => above[l.0] = false,
+            None => {}
+        }
+    }
+
+    pub fn simplify(&mut self) {
+        if self.simple {
+            return;
+        }
+        
+        let mut above = Vec::<bool>::with_capacity(self.targets.len());
+        above.resize(self.targets.len(), false);
+
+        let mut below = Vec::<bool>::with_capacity(self.targets.len());
+        below.resize(self.targets.len(), false);
+
+        let roots = self.roots.clone();
+        
+        for root in roots.iter() {
+            self.simplify_impl(*root, None, &mut above, &mut below);
+        }
+
+        self.simple = true;
     }
 }
 
@@ -242,6 +333,103 @@ mod tests {
         assert!(!deptree.done());
 
         deptree.fail(a).unwrap();
+        assert!(deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 0);
+    }
+
+    #[test]
+    fn dup_simplify() {
+        let mut deptree = Deptree::<()>::new();
+
+        let a = deptree.add_target("a");
+        let b = deptree.add_target("b");
+        let c = deptree.add_target("c");
+
+        deptree.depend(b, a);
+        deptree.depend(c, b);
+        deptree.depend(c, a);
+
+        let a_dep_by = deptree.depended_by(a);
+        assert_eq!(a_dep_by.len(), 2);
+        assert!(!a_dep_by.iter().find(|&i| *i == b).is_none());
+        assert!(!a_dep_by.iter().find(|&i| *i == c).is_none());
+
+        deptree.simplify();
+
+        let a_dep_by = deptree.depended_by(a);
+        assert_eq!(a_dep_by.len(), 1);
+        assert_eq!(a_dep_by[0], b);
+        
+        let b_dep_by = deptree.depended_by(b);
+        assert_eq!(b_dep_by.len(), 1);
+        assert_eq!(b_dep_by[0], c);
+        
+        let c_dep_by = deptree.depended_by(c);
+        assert_eq!(c_dep_by.len(), 0);
+    }
+    
+    #[test]
+    fn dup_simplify_run() {
+        let mut deptree = Deptree::<()>::new();
+
+        let a = deptree.add_target("a");
+        let b = deptree.add_target("b");
+        let c = deptree.add_target("c");
+
+        deptree.depend(b, a);
+        deptree.depend(c, b);
+        deptree.depend(c, a);
+
+        assert!(!deptree.done());
+        assert_eq!(deptree.name(a), "a");
+        assert_eq!(deptree.name(b), "b");
+        assert_eq!(deptree.name(c), "c");
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(deptree.name(ready[0]), "a");
+        assert!(!deptree.done());
+        
+        deptree.start(a).unwrap();
+        assert!(!deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 0);
+        assert!(!deptree.done());
+
+        deptree.finish(a).unwrap();
+        assert!(!deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(deptree.name(ready[0]), "b");
+        assert!(!deptree.done());
+
+        deptree.start(b).unwrap();
+        assert!(!deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 0);
+        assert!(!deptree.done());
+
+        deptree.finish(b).unwrap();
+        assert!(!deptree.done());
+        
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(deptree.name(ready[0]), "c");
+        assert!(!deptree.done());
+
+        deptree.start(c).unwrap();
+        assert!(!deptree.done());
+
+        let ready = deptree.ready();
+        assert_eq!(ready.len(), 0);
+        assert!(!deptree.done());
+
+        deptree.finish(c).unwrap();
         assert!(deptree.done());
 
         let ready = deptree.ready();
