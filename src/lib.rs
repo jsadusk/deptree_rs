@@ -204,39 +204,38 @@ impl<Attribs> Deptree<Attribs> {
         result
     }
 
-    fn simplify_impl(&mut self, target : TargetIndex, last : Option<TargetIndex>,
-                     above : &mut Vec<bool>, below : &mut Vec<bool>) {
+    fn simplify_impl(&mut self, target : TargetIndex,
+                     seen : &mut Vec<bool>) -> Vec<bool> {
         let num_targets = self.targets.len();
 
-        self.targets[target.0].up.retain(|&d| !above[d.0]);
+        seen[target.0] = true;
 
-        match last {
-            Some(l) => above[l.0] = true,
-            None => {}
-        }
-        
         let mut prune = Vec::<bool>::with_capacity(num_targets);
         prune.resize(num_targets, false);
 
         // fighting the borrow checker
         let down = self.targets[target.0].down.clone();
-        
-        for dependent in down.iter() {
-            self.simplify_impl(*dependent, Some(target), above, below);
 
-            if !self.targets[dependent.0].up.contains(&target) {
-                prune[dependent.0] = true;
+        let mut below = Vec::<bool>::with_capacity(num_targets);
+        below.resize(num_targets, false);
+                
+        for dependent in down.iter() {
+            if !seen[dependent.0] {
+                let this_below = self.simplify_impl(*dependent, seen);
+
+                for i in 0..self.targets.len() {
+                    below[i] = below[i] || this_below[i];
+                }
             }
         }
 
-        self.targets[target.0].down.retain(|&d| !prune[d.0]);
+        self.targets[target.0].down.retain(|&d| !below[d.0]);
 
-        below[target.0] = true;
-
-        match last {
-            Some(l) => above[l.0] = false,
-            None => {}
+        for dependent in down.iter() {
+            below[dependent.0] = true;
         }
+
+        below
     }
 
     pub fn simplify(&mut self) {
@@ -244,16 +243,13 @@ impl<Attribs> Deptree<Attribs> {
             return;
         }
         
-        let mut above = Vec::<bool>::with_capacity(self.targets.len());
-        above.resize(self.targets.len(), false);
-
-        let mut below = Vec::<bool>::with_capacity(self.targets.len());
-        below.resize(self.targets.len(), false);
+        let mut seen = Vec::<bool>::with_capacity(self.targets.len());
+        seen.resize(self.targets.len(), false);
 
         let roots = self.roots.clone();
         
         for root in roots.iter() {
-            self.simplify_impl(*root, None, &mut above, &mut below);
+            let _below = self.simplify_impl(*root, &mut seen);
         }
 
         self.simple = true;
