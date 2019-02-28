@@ -59,7 +59,7 @@ impl<Attribs> TargetData<Attribs> {
 
 type Targets<Attribs> = Vec<TargetData<Attribs>>;
 
-pub struct Deptree<Attribs = ()> {
+pub struct Deptree<Attribs> {
     targets : Targets<Attribs>,
     roots : Indices,
     leaves : Indices,
