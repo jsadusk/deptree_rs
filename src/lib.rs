@@ -68,7 +68,7 @@ pub struct Deptree<Attribs> {
 }
 
 impl<Attribs> Deptree<Attribs> {
-    pub fn new() -> Deptree {
+    pub fn new() -> Deptree<Attribs> {
         Deptree {
             targets : Targets::new(),
             roots : Indices::new(),
